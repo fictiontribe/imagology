@@ -5,6 +5,7 @@ const NAV = [
   { label: 'StitchBox', href: 'https://stitchbox.fictiontribe.com' },
   { label: 'Glyphforge', href: 'https://glyphforge.fictiontribe.com' },
   { label: 'Scratcher', href: 'https://scratcher.fictiontribe.com' },
+  { label: 'Manifold', href: 'https://manifold.fictiontribe.com' },
 ]
 
 export function Footer() {
