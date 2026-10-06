@@ -1,5 +1,9 @@
+import { generateContent, textOf, finishReasonOf, type FtAiEnv } from './ft-ai.mjs'
+
 interface Env {
-  GEMINI_API_KEY?: string
+  FT_AI?: FtAiEnv['FT_AI']
+  FT_AI_KEY?: string
+  FT_AI_URL?: string
 }
 
 interface PagesContext {
@@ -23,10 +27,6 @@ interface ComposeRequest {
 
 type GenerateRequest = SceneRequest | ComposeRequest
 
-// Alias that tracks the current Flash model. Pinning an explicit version is what
-// broke this: gemini-2.5-flash was retired for new API keys and started 404ing.
-const MODEL = 'gemini-flash-latest'
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`
 
 const SCENE_SCHEMA = {
   type: 'OBJECT',
@@ -70,37 +70,25 @@ function upstreamMessage(status: number): string {
   return 'The idea engine could not generate anything just now.'
 }
 
+// Gemini goes through the shared ft-ai gateway (FT_AI service binding). The
+// gateway owns the model choice for the `text` role, retries transient failures,
+// and falls back if a model is retired — so nothing here names a model.
 async function callGemini(
-  key: string,
+  env: FtAiEnv,
   prompt: string,
   generationConfig: Record<string, unknown>,
-  attempt = 0,
 ): Promise<{ text: string | null; status: number }> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig,
-    }),
-  })
-  if (!res.ok) {
-    // Surface the upstream reason in the deployment logs. Without this, a bad
-    // request is indistinguishable from a dead model — both just read as a
-    // status code, which cost real time to diagnose once already.
-    const detail = await res.text().catch(() => '')
-    console.error(`Gemini ${res.status} (attempt ${attempt}): ${detail.slice(0, 500)}`)
-    // Retry once on transient upstream failures (rate limit / server error).
-    if ((res.status === 429 || res.status >= 500) && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)))
-      return callGemini(key, prompt, generationConfig, attempt + 1)
-    }
-    return { text: null, status: res.status }
+  const result = await generateContent(env, 'text', { contents: [{ parts: [{ text: prompt }] }], generationConfig })
+  if (result.status >= 400) {
+    const attempts = result.attempts.map((a) => `${a.model}=${a.status}`).join(',')
+    console.error(`ft-ai ${result.status} [${attempts}]: ${JSON.stringify(result.data).slice(0, 500)}`)
+    return { text: null, status: result.status }
   }
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[]
+  if (finishReasonOf(result.data) === 'MAX_TOKENS') {
+    console.error(`Answer truncated at maxOutputTokens (model ${result.model})`)
   }
-  return { text: data.candidates?.[0]?.content?.parts?.[0]?.text ?? null, status: res.status }
+  // Thinking models can emit several parts; the answer is the last non-thought text part.
+  return { text: textOf(result.data), status: result.status }
 }
 
 function scenePrompt(body: SceneRequest): string {
@@ -152,9 +140,8 @@ function composePrompt(body: ComposeRequest): string {
 }
 
 export const onRequestPost = async (context: PagesContext): Promise<Response> => {
-  const key = context.env.GEMINI_API_KEY
-  if (!key) {
-    console.error('GEMINI_API_KEY is not bound to this deployment')
+  if (!context.env.FT_AI && !context.env.FT_AI_KEY) {
+    console.error('FT_AI service binding is not configured for this deployment')
     return errorResponse('The idea engine is not configured for this deployment.')
   }
 
@@ -167,7 +154,7 @@ export const onRequestPost = async (context: PagesContext): Promise<Response> =>
 
   try {
     if (body.mode === 'scene') {
-      const { text, status } = await callGemini(key, scenePrompt(body), {
+      const { text, status } = await callGemini(context.env, scenePrompt(body), {
         temperature: 1.2,
         topP: 0.95,
         responseMimeType: 'application/json',
@@ -191,7 +178,7 @@ export const onRequestPost = async (context: PagesContext): Promise<Response> =>
     }
 
     if (body.mode === 'compose') {
-      const { text, status } = await callGemini(key, composePrompt(body), {
+      const { text, status } = await callGemini(context.env, composePrompt(body), {
         temperature: 0.9,
         // gemini-flash-latest is a thinking model: composing a 170-230 word
         // paragraph burns ~3400 reasoning tokens BEFORE the prose. 2048 truncated

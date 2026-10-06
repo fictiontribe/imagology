@@ -22,6 +22,8 @@
 		"directory": "./out",
 		"binding": "ASSETS",
 		"run_worker_first": ["/api/*"]
-	}
-	// Secret, set once per environment: wrangler secret put GEMINI_API_KEY
+	},
+	// Gemini is reached through the shared ft-ai gateway (dev-projects/ft-ai) —
+	// no Gemini key or model name lives in this repo.
+	"services": [{ "binding": "FT_AI", "service": "ft-ai" }]
 }
